@@ -215,8 +215,10 @@
     on:mouseleave={mUp}
     on:wheel={wheel}
     on:click={click}
-  />
+  >
   
+  </canvas>
+
   <!-- Save buttons -->
   <div class="save-buttons">
     <button on:click={saveAsPng}>Save as PNG</button>
