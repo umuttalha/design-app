@@ -1,0 +1,56 @@
+name: Deploy Svelte to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main # Veya ana branch'iniz (örn: master)
+  workflow_dispatch: # Manuel tetikleme için
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22' # Kullandığınız Node.js sürümünü yazın
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci # veya npm install
+
+      # Projeyi build et (vite.config.js'deki base ayarı burada etkili olacak)
+      - name: Build Svelte app
+        run: npm run build 
+
+      # Single Page Application (SPA) için 404 yönlendirmesi
+      # GitHub Pages'de direkt linklere gidildiğinde 404 vermemesi için
+      # index.html'i 404.html olarak kopyalarız.
+      - name: Prepare for SPA deployment
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          # Vite'ın build çıktısı varsayılan olarak 'dist' klasörüdür
+          path: './dist' 
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+        # Artifact otomatik olarak deploy edilir
