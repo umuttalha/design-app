@@ -1,15 +1,16 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 
-// Repo adınızı buraya yazın
-const repoName = 'design-app'; 
+// Repo adını burada tutmaya gerek kalmadı (base için)
+// const repoName = 'design-app'; 
 
 // https://vitejs.dev/config/
 export default defineConfig(({ command }) => {
-  const isProduction = command === 'build';
+  // command değişkenini kullanmaya gerek kalmadı (şimdilik)
+  // const isProduction = command === 'build'; 
   return {
     plugins: [svelte()],
-    // Sadece build işlemi sırasında base path'i ayarla
-    base: isProduction ? `/${repoName}/` : '/', 
+    // Base path her zaman '/' olmalı (Cloudflare Pages root deploy için)
+    base: '/', 
   }
 })
