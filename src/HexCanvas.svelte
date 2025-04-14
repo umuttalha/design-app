@@ -9,12 +9,12 @@
     const HEX_SIZE   = 40;    // how big each hex (outer radius in px)
     const DRAW_RANGE = 15;    // how many hexes in each direction
     const INCLUDE_CENTER = true;  
-    // set false if you DON’T want lines from center→corners/midpoints
+    // set false if you DON'T want lines from center→corners/midpoints
   
     // Precompute the local geometry once (radius=1 in local space).
     const fullHex = makeFullHex(INCLUDE_CENTER);
   
-    // For each cell, we’ll scale & offset that local geometry by HEX_SIZE + (cx, cy).
+    // For each cell, we'll scale & offset that local geometry by HEX_SIZE + (cx, cy).
     function cellSegments(q, r) {
       const cxy = hexToPixel(q, r, HEX_SIZE);
       return fullHex.segments.map(([p1, p2]) => {
@@ -30,6 +30,7 @@
   
     // main drawing
     function draw() {
+      if (!canvas || !ctx) return; // Guard against early calls
       const w = canvas.width  = canvas.clientWidth;
       const h = canvas.height = canvas.clientHeight;
       ctx.clearRect(0, 0, w, h);
@@ -62,7 +63,8 @@
     // onMount
     onMount(() => {
       ctx = canvas.getContext('2d');
-      draw();
+      // Ensure initial draw happens after canvas dimensions are set
+      requestAnimationFrame(draw);
   
       const unsub = [
         cameraX.subscribe(draw),
@@ -73,46 +75,148 @@
       return () => unsub.forEach(u => u());
     });
   
-    // pan & zoom
-    let dragging = false, lastX, lastY;
+    // --- Mouse pan & zoom ---
+    let dragging = false, lastMouseDownX, lastMouseDownY, lastDragX, lastDragY;
     function mDown(e) {
+      if (e.button !== 0) return; // Only handle left clicks
       dragging = true;
-      lastX = e.clientX;
-      lastY = e.clientY;
+      lastMouseDownX = e.clientX;
+      lastMouseDownY = e.clientY;
+      lastDragX = e.clientX;
+      lastDragY = e.clientY;
+      canvas.style.cursor = 'grabbing';
     }
     function mMove(e) {
       if (!dragging) return;
-      cameraX.update(cx => cx + (e.clientX - lastX));
-      cameraY.update(cy => cy + (e.clientY - lastY));
-      lastX = e.clientX;
-      lastY = e.clientY;
+      cameraX.update(cx => cx + (e.clientX - lastDragX));
+      cameraY.update(cy => cy + (e.clientY - lastDragY));
+      lastDragX = e.clientX;
+      lastDragY = e.clientY;
     }
-    function mUp() {
+    function mUp(e) {
+      if (!dragging || e.button !== 0) return;
       dragging = false;
+      canvas.style.cursor = 'grab';
+       // Check if it was a click (minimal movement)
+       const movedDist = Math.hypot(e.clientX - lastMouseDownX, e.clientY - lastMouseDownY);
+       if (movedDist < 5) { // Treat as click if moved less than 5px
+          handleInteraction(e.clientX, e.clientY);
+       }
     }
     function wheel(e) {
       e.preventDefault();
-      const oldScale = get(scale);
-      let newScale = oldScale * (e.deltaY < 0 ? 1.1 : 0.9);
-      newScale = Math.min(Math.max(newScale, 0.2), 5);
-  
-      // zoom around mouse
-      const rect = canvas.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
-      // convert screen→world
-      const wx = (sx - get(cameraX)) / oldScale;
-      const wy = (sy - get(cameraY)) / oldScale;
-      scale.set(newScale);
-      cameraX.set(sx - wx * newScale);
-      cameraY.set(sy - wy * newScale);
+      zoomCanvas(e.deltaY < 0 ? 1.1 : 0.9, e.clientX, e.clientY);
     }
   
-    // click to toggle nearest segment
-    function click(e) {
+    // --- Touch pan & zoom ---
+    let touchDragging = false;
+    let lastTouchX = null, lastTouchY = null;
+    let initialPinchDistance = null;
+    let touchStartTime = 0;
+    let startTouchX = 0, startTouchY = 0; // To detect taps vs drags
+  
+    function tDown(e) {
+        e.preventDefault(); // Prevent default touch behaviors like scrolling
+        if (e.touches.length === 1) {
+            const touch = e.touches[0];
+            touchDragging = true;
+            touchStartTime = Date.now();
+            startTouchX = touch.clientX;
+            startTouchY = touch.clientY;
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+            initialPinchDistance = null; // Reset pinch on new single touch
+            canvas.style.cursor = 'grabbing';
+        } else if (e.touches.length === 2) {
+            touchDragging = false; // Stop single-touch drag if second finger comes down
+            initialPinchDistance = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+        }
+    }
+  
+    function tMove(e) {
+        e.preventDefault();
+        if (e.touches.length === 1 && touchDragging) {
+            const touch = e.touches[0];
+            cameraX.update(cx => cx + (touch.clientX - lastTouchX));
+            cameraY.update(cy => cy + (touch.clientY - lastTouchY));
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+        } else if (e.touches.length === 2 && initialPinchDistance !== null) {
+            const currentPinchDistance = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            // Avoid division by zero or extreme zoom on very small initial distance
+            if (initialPinchDistance > 1) { 
+                 const zoomFactor = currentPinchDistance / initialPinchDistance;
+                 const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                 const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                 zoomCanvas(zoomFactor, midX, midY);
+            }
+            // Update initial distance for continuous zoom feel
+            initialPinchDistance = currentPinchDistance;
+        }
+    }
+  
+    function tEnd(e) {
+        e.preventDefault();
+        const touchEndTime = Date.now();
+  
+        if (e.changedTouches.length === 1 && touchDragging) {
+             // Check if it was a tap (short duration, minimal movement)
+             const touch = e.changedTouches[0];
+             const duration = touchEndTime - touchStartTime;
+             const movedDist = Math.hypot(touch.clientX - startTouchX, touch.clientY - startTouchY);
+  
+             if (duration < 250 && movedDist < 10) { // Tap thresholds (adjust as needed)
+                 handleInteraction(touch.clientX, touch.clientY);
+             }
+        }
+  
+        // Reset flags based on remaining touches
+        if (e.touches.length < 2) {
+             initialPinchDistance = null;
+        }
+        if (e.touches.length < 1) {
+             touchDragging = false;
+             canvas.style.cursor = 'grab';
+             lastTouchX = null;
+             lastTouchY = null;
+        }
+    }
+  
+    // --- Unified Zoom Logic ---
+    function zoomCanvas(zoomFactor, screenX, screenY) {
+        const oldScale = get(scale);
+        let newScale = oldScale * zoomFactor;
+        newScale = Math.min(Math.max(newScale, 0.2), 5); // Clamp scale
+  
+        if (Math.abs(newScale - oldScale) < 1e-5) return; // No significant change
+  
+        const rect = canvas.getBoundingClientRect();
+        const sx = screenX - rect.left;
+        const sy = screenY - rect.top;
+  
+        // Convert screen point to world coordinates before zoom
+        const wx = (sx - get(cameraX)) / oldScale;
+        const wy = (sy - get(cameraY)) / oldScale;
+  
+        // Update scale
+        scale.set(newScale);
+  
+        // Calculate the new camera position to keep the world point under the screen point
+        cameraX.set(sx - wx * newScale);
+        cameraY.set(sy - wy * newScale);
+    }
+  
+    // --- Unified Interaction Handler (Click/Tap) ---
+    function handleInteraction(screenX, screenY) {
       const rect = canvas.getBoundingClientRect();
-      const sx = e.clientX - rect.left;
-      const sy = e.clientY - rect.top;
+      const sx = screenX - rect.left;
+      const sy = screenY - rect.top;
       const s  = get(scale);
   
       // screen -> world
@@ -120,19 +224,33 @@
       const wy = (sy - get(cameraY)) / s;
   
       let nearestKey = null;
-      let nearestDist = 6; // px tolerance
-      for (let q = -DRAW_RANGE; q <= DRAW_RANGE; q++) {
-        for (let r = -DRAW_RANGE; r <= DRAW_RANGE; r++) {
-          const segs = cellSegments(q, r);
-          for (const seg of segs) {
-            const d = pointToSegmentDist(wx, wy, seg.x1, seg.y1, seg.x2, seg.y2);
-            if (d < nearestDist) {
-              nearestDist = d;
-              nearestKey  = seg.key;
-            }
-          }
-        }
+      let nearestDistSq = (6 / s) * (6 / s); // Use squared distance for efficiency, tolerance in world space
+  
+      // Iterate through a smaller range around the click/tap first for performance
+      const centerHex = pixelToHex(wx, wy, HEX_SIZE);
+      const roundedCenter = roundAxial(centerHex.q, centerHex.r);
+      const searchRadius = 2; // Search nearby hexes
+  
+      for (let dq = -searchRadius; dq <= searchRadius; dq++) {
+          for (let dr = -searchRadius; dr <= searchRadius; dr++) {
+             const q = roundedCenter.q + dq;
+             const r = roundedCenter.r + dr;
+             // Basic range check (optional, depends if DRAW_RANGE is strict)
+             if (Math.abs(q) > DRAW_RANGE || Math.abs(r) > DRAW_RANGE || Math.abs(q + r) > DRAW_RANGE * 2) continue;
+  
+             const segs = cellSegments(q, r);
+             for (const seg of segs) {
+                 const dSq = pointToSegmentDistSq(wx, wy, seg.x1, seg.y1, seg.x2, seg.y2);
+                 if (dSq < nearestDistSq) {
+                     nearestDistSq = dSq;
+                     nearestKey = seg.key;
+                 }
+             }
+         }
       }
+  
+      // Optional: Fallback to wider search if nothing found nearby (might be slow)
+      // if (!nearestKey) { ... loop through -DRAW_RANGE to DRAW_RANGE ... }
   
       if (nearestKey) {
         selectedSegments.update(old => {
@@ -143,16 +261,26 @@
       }
     }
   
-    // distance from point(px,py) to line segment(x1,y1 -> x2,y2)
-    function pointToSegmentDist(px, py, x1, y1, x2, y2) {
+    // Squared distance from point(px,py) to line segment(x1,y1 -> x2,y2)
+    function pointToSegmentDistSq(px, py, x1, y1, x2, y2) {
       const dx = x2 - x1, dy = y2 - y1;
-      if (dx === 0 && dy === 0) {
-        return Math.hypot(px - x1, py - y1);
+      const lengthSq = dx * dx + dy * dy;
+      if (lengthSq === 0) { // Segment is a point
+        const pdx = px - x1;
+        const pdy = py - y1;
+        return pdx * pdx + pdy * pdy;
       }
-      let t = ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy);
+      // Project point (px, py) onto the line containing the segment
+      let t = ((px - x1) * dx + (py - y1) * dy) / lengthSq;
+      // Clamp t to the range [0, 1] to stay within the segment
       t = Math.max(0, Math.min(1, t));
-      const cx = x1 + t * dx, cy = y1 + t * dy;
-      return Math.hypot(px - cx, py - cy);
+      // Calculate the closest point (cx, cy) on the segment to (px, py)
+      const cx = x1 + t * dx;
+      const cy = y1 + t * dy;
+      // Return the squared distance
+      const distDx = px - cx;
+      const distDy = py - cy;
+      return distDx * distDx + distDy * distDy;
     }
   
     // ---- Save as PNG & JPEG code ----
@@ -214,7 +342,11 @@
     on:mouseup={mUp}
     on:mouseleave={mUp}
     on:wheel={wheel}
-    on:click={click}
+    on:touchstart={tDown}
+    on:touchmove={tMove}
+    on:touchend={tEnd}
+    on:touchcancel={tEnd}
+    style="display: block; width: 100%; height: 100%; cursor: grab; touch-action: none;"
   >
   
   </canvas>
