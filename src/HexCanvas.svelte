@@ -322,15 +322,17 @@
       bottom: 10px;
       left: 10px;
       z-index: 10;
-      background-color: rgba(52, 33, 33, 0.351);
+      background-color: rgba(255, 255, 255, 0);
       border-radius: 4px;
       padding: 8px;
+      
     }
     .save-buttons button {
       margin-right: 8px;
       padding: 6px 12px;
       font-size: 14px;
       cursor: pointer;
+      color:white;
     }
   </style>
   

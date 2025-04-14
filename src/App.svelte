@@ -11,7 +11,7 @@
 
 <main style="position: fixed; inset: 0; overflow: hidden;">
   <HexCanvas />
-  <button style="position: fixed; top: 10px; right: 10px;" on:click={clearSavedState}>
+  <button style="position: fixed; top: 10px; right: 10px; color:white" on:click={clearSavedState}>
     Clear Saved State
   </button>
 </main>
