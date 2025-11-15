@@ -1,19 +1,42 @@
 <script>
     import { onMount } from 'svelte';
-    import { cameraX, cameraY, scale, selectedSegments } from './stores.js';
+    import { cameraX, cameraY, scale, selectedSegments, segmentColors, currentColor } from './stores.js';
     import { get } from 'svelte/store';
     import { hexToPixel, pixelToHex, roundAxial, makeFullHex } from './hex.js';
   
     let canvas, ctx;
-  
+    let copiedSegments = []; // Store copied segment data for paste/mirror
+
     const HEX_SIZE   = 40;    // how big each hex (outer radius in px)
-    const DRAW_RANGE = 15;    // how many hexes in each direction
     const INCLUDE_CENTER = true;  
     // set false if you DON'T want lines from center→corners/midpoints
   
     // Precompute the local geometry once (radius=1 in local space).
     const fullHex = makeFullHex(INCLUDE_CENTER);
-  
+
+    // Calculate how many hexes we need to draw to fill the viewport (for infinite background)
+    function calculateDrawRange(canvasWidth, canvasHeight, currentScale, camX, camY) {
+      // Calculate the visible world space bounds
+      const worldLeft = (0 - camX) / currentScale;
+      const worldTop = (0 - camY) / currentScale;
+      const worldRight = (canvasWidth - camX) / currentScale;
+      const worldBottom = (canvasHeight - camY) / currentScale;
+
+      // Convert world bounds to hex coordinates
+      const topLeft = pixelToHex(worldLeft, worldTop, HEX_SIZE);
+      const topRight = pixelToHex(worldRight, worldTop, HEX_SIZE);
+      const bottomLeft = pixelToHex(worldLeft, worldBottom, HEX_SIZE);
+      const bottomRight = pixelToHex(worldRight, worldBottom, HEX_SIZE);
+
+      // Find the min/max hex coordinates that cover the viewport (with buffer)
+      const minQ = Math.floor(Math.min(topLeft.q, topRight.q, bottomLeft.q, bottomRight.q)) - 2;
+      const maxQ = Math.ceil(Math.max(topLeft.q, topRight.q, bottomLeft.q, bottomRight.q)) + 2;
+      const minR = Math.floor(Math.min(topLeft.r, topRight.r, bottomLeft.r, bottomRight.r)) - 2;
+      const maxR = Math.ceil(Math.max(topLeft.r, topRight.r, bottomLeft.r, bottomRight.r)) + 2;
+
+      return { minQ, maxQ, minR, maxR };
+    }
+
     // For each cell, we'll scale & offset that local geometry by HEX_SIZE + (cx, cy).
     function cellSegments(q, r) {
       const cxy = hexToPixel(q, r, HEX_SIZE);
@@ -36,27 +59,62 @@
       ctx.clearRect(0, 0, w, h);
   
       ctx.save();
-      ctx.translate(get(cameraX), get(cameraY));
-      ctx.scale(get(scale), get(scale));
-  
+      const currentScale = get(scale);
+      const camX = get(cameraX);
+      const camY = get(cameraY);
+
+      ctx.translate(camX, camY);
+      ctx.scale(currentScale, currentScale);
+
       const sel = get(selectedSegments);
-  
-      for (let q = -DRAW_RANGE; q <= DRAW_RANGE; q++) {
-        for (let r = -DRAW_RANGE; r <= DRAW_RANGE; r++) {
+      const colors = get(segmentColors);
+
+      // Calculate dynamic draw range for infinite background
+      const { minQ, maxQ, minR, maxR } = calculateDrawRange(w, h, currentScale, camX, camY);
+
+      // Use a Set to track already-drawn edges and prevent overlap
+      const drawnEdges = new Set();
+
+      for (let q = minQ; q <= maxQ; q++) {
+        for (let r = minR; r <= maxR; r++) {
           const segs = cellSegments(q, r);
           for (const seg of segs) {
+            // Create a normalized edge key (same for both hexes sharing this edge)
+            // Round to 2 decimal places to handle floating point precision
+            const x1 = Math.round(seg.x1 * 100) / 100;
+            const y1 = Math.round(seg.y1 * 100) / 100;
+            const x2 = Math.round(seg.x2 * 100) / 100;
+            const y2 = Math.round(seg.y2 * 100) / 100;
+
+            // Always put the "smaller" point first for consistent edge keys
+            const edgeKey = (x1 < x2 || (x1 === x2 && y1 < y2))
+              ? `${x1},${y1}-${x2},${y2}`
+              : `${x2},${y2}-${x1},${y1}`;
+
+            // Skip if this edge was already drawn
+            if (drawnEdges.has(edgeKey)) continue;
+            drawnEdges.add(edgeKey);
+
             ctx.beginPath();
             ctx.moveTo(seg.x1, seg.y1);
             ctx.lineTo(seg.x2, seg.y2);
-  
+
             const isSel = sel.has(seg.key);
-            ctx.strokeStyle = isSel ? '#f33' : '#555';
-            ctx.lineWidth   = isSel ? (3 / get(scale)) : (1 / get(scale));
+            const segColor = colors.get(seg.key);
+
+            // Use segment's color if set, otherwise default color
+            if (segColor) {
+              ctx.strokeStyle = segColor;
+              ctx.lineWidth = (3 / currentScale);
+            } else {
+              ctx.strokeStyle = isSel ? get(currentColor) : '#555';
+              ctx.lineWidth = isSel ? (3 / currentScale) : (1 / currentScale);
+            }
             ctx.stroke();
           }
         }
       }
-  
+
       ctx.restore();
     }
   
@@ -71,10 +129,143 @@
         cameraY.subscribe(draw),
         scale.subscribe(draw),
         selectedSegments.subscribe(draw),
+        segmentColors.subscribe(draw),
+        currentColor.subscribe(draw),
       ];
       return () => unsub.forEach(u => u());
     });
   
+    // --- Copy/Paste/Mirror Functions ---
+    function copySelection() {
+      const sel = get(selectedSegments);
+      const colors = get(segmentColors);
+      if (sel.size === 0) return;
+
+      copiedSegments = Array.from(sel).map(key => ({
+        key,
+        color: colors.get(key) || get(currentColor)
+      }));
+      console.log(`Copied ${copiedSegments.length} segments`);
+    }
+
+    function pasteSelection() {
+      if (copiedSegments.length === 0) return;
+
+      const colors = get(segmentColors);
+      copiedSegments.forEach(({ key, color }) => {
+        colors.set(key, color);
+      });
+      segmentColors.set(colors);
+
+      // Select the pasted segments
+      selectedSegments.set(new Set(copiedSegments.map(s => s.key)));
+      console.log(`Pasted ${copiedSegments.length} segments`);
+    }
+
+    function mirrorSelection() {
+      const sel = get(selectedSegments);
+      const colors = get(segmentColors);
+      if (sel.size === 0) return;
+
+      // Parse segment keys to extract hex coordinates and points
+      const newColors = new Map(colors);
+      const newSelection = new Set();
+
+      sel.forEach(key => {
+        // Parse key format: "(q,r):[x1,y1]->[x2,y2]"
+        const match = key.match(/\((-?\d+),(-?\d+)\):\[(.*?)\]->\[(.*?)\]/);
+        if (!match) return;
+
+        const [_, q, r, p1Str, p2Str] = match;
+        const qNum = parseInt(q);
+        const rNum = parseInt(r);
+
+        // Mirror horizontally (flip q coordinate)
+        const mirroredQ = -qNum;
+        const mirroredR = rNum;
+
+        // Parse point coordinates
+        const [p1x, p1y] = p1Str.split(',').map(parseFloat);
+        const [p2x, p2y] = p2Str.split(',').map(parseFloat);
+
+        // Mirror the points horizontally (negate x coordinates)
+        const mp1x = -p1x;
+        const mp2x = -p2x;
+
+        // Create mirrored key
+        const mirroredKey = `(${mirroredQ},${mirroredR}):[${mp1x.toFixed(2)},${p1y.toFixed(2)}]->[${mp2x.toFixed(2)},${p2y.toFixed(2)}]`;
+
+        // Copy the color
+        const segColor = colors.get(key) || get(currentColor);
+        newColors.set(mirroredKey, segColor);
+        newSelection.add(mirroredKey);
+      });
+
+      segmentColors.set(newColors);
+      selectedSegments.set(newSelection);
+      console.log(`Mirrored ${sel.size} segments`);
+    }
+
+    function applyColorToSelection() {
+      const sel = get(selectedSegments);
+      const color = get(currentColor);
+      const colors = get(segmentColors);
+
+      sel.forEach(key => {
+        colors.set(key, color);
+      });
+      segmentColors.set(colors);
+    }
+
+    function clearSelection() {
+      selectedSegments.set(new Set());
+    }
+
+    function deleteSelection() {
+      const sel = get(selectedSegments);
+      const colors = get(segmentColors);
+
+      sel.forEach(key => {
+        colors.delete(key);
+      });
+      segmentColors.set(colors);
+      selectedSegments.set(new Set());
+    }
+
+    // --- Keyboard Shortcuts ---
+    function handleKeydown(e) {
+      // Ctrl+C or Cmd+C: Copy
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+        e.preventDefault();
+        copySelection();
+      }
+      // Ctrl+V or Cmd+V: Paste
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+        e.preventDefault();
+        pasteSelection();
+      }
+      // Ctrl+M or Cmd+M: Mirror
+      else if ((e.ctrlKey || e.metaKey) && e.key === 'm') {
+        e.preventDefault();
+        mirrorSelection();
+      }
+      // Enter: Apply color to selection
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        applyColorToSelection();
+      }
+      // Delete or Backspace: Delete colored segments
+      else if (e.key === 'Delete' || e.key === 'Backspace') {
+        e.preventDefault();
+        deleteSelection();
+      }
+      // Escape: Clear selection
+      else if (e.key === 'Escape') {
+        e.preventDefault();
+        clearSelection();
+      }
+    }
+
     // --- Mouse pan & zoom ---
     let dragging = false, lastMouseDownX, lastMouseDownY, lastDragX, lastDragY;
     function mDown(e) {
@@ -235,9 +426,7 @@
           for (let dr = -searchRadius; dr <= searchRadius; dr++) {
              const q = roundedCenter.q + dq;
              const r = roundedCenter.r + dr;
-             // Basic range check (optional, depends if DRAW_RANGE is strict)
-             if (Math.abs(q) > DRAW_RANGE || Math.abs(r) > DRAW_RANGE || Math.abs(q + r) > DRAW_RANGE * 2) continue;
-  
+
              const segs = cellSegments(q, r);
              for (const seg of segs) {
                  const dSq = pointToSegmentDistSq(wx, wy, seg.x1, seg.y1, seg.x2, seg.y2);
@@ -249,8 +438,7 @@
          }
       }
   
-      // Optional: Fallback to wider search if nothing found nearby (might be slow)
-      // if (!nearestKey) { ... loop through -DRAW_RANGE to DRAW_RANGE ... }
+      // Note: With infinite background, local search is sufficient for performance
   
       if (nearestKey) {
         selectedSegments.update(old => {
@@ -316,6 +504,84 @@
     canvas:active {
       cursor: grabbing;
     }
+    /* Control Panel */
+    .control-panel {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+      background-color: rgba(0, 0, 0, 0.8);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      backdrop-filter: blur(5px);
+    }
+
+    .color-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .color-section label {
+      color: white;
+      font-size: 14px;
+      font-weight: bold;
+    }
+
+    #colorPicker {
+      width: 60px;
+      height: 40px;
+      border: 2px solid #555;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .color-presets {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+
+    .color-preset {
+      width: 30px;
+      height: 30px;
+      border: 2px solid #555;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .color-preset:hover {
+      transform: scale(1.1);
+      border-color: white;
+    }
+
+    .button-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .button-group button,
+    .control-panel button {
+      padding: 8px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      background-color: rgba(255, 255, 255, 0.1);
+      color: white;
+      border: 1px solid #555;
+      border-radius: 4px;
+      transition: background-color 0.2s;
+    }
+
+    .button-group button:hover,
+    .control-panel button:hover {
+      background-color: rgba(255, 255, 255, 0.2);
+    }
+
     /* Optional: style the save buttons */
     .save-buttons {
       position: fixed;
@@ -325,7 +591,7 @@
       background-color: rgba(255, 255, 255, 0);
       border-radius: 4px;
       padding: 8px;
-      
+
     }
     .save-buttons button {
       margin-right: 8px;
@@ -337,6 +603,8 @@
   </style>
   
   <!-- Canvas element -->
+  <svelte:window on:keydown={handleKeydown} />
+
   <canvas
     bind:this={canvas}
     on:mousedown={mDown}
@@ -350,8 +618,39 @@
     on:touchcancel={tEnd}
     style="display: block; width: 100%; height: 100%; cursor: grab; touch-action: none;"
   >
-  
+
   </canvas>
+
+  <!-- Control Panel -->
+  <div class="control-panel">
+    <div class="color-section">
+      <label for="colorPicker">Color:</label>
+      <input
+        id="colorPicker"
+        type="color"
+        bind:value={$currentColor}
+        title="Select color for segments"
+      />
+      <div class="color-presets">
+        <button class="color-preset" style="background: #f33;" on:click={() => currentColor.set('#f33')} title="Red"></button>
+        <button class="color-preset" style="background: #3f3;" on:click={() => currentColor.set('#3f3')} title="Green"></button>
+        <button class="color-preset" style="background: #33f;" on:click={() => currentColor.set('#33f')} title="Blue"></button>
+        <button class="color-preset" style="background: #ff0;" on:click={() => currentColor.set('#ff0')} title="Yellow"></button>
+        <button class="color-preset" style="background: #f0f;" on:click={() => currentColor.set('#f0f')} title="Magenta"></button>
+        <button class="color-preset" style="background: #0ff;" on:click={() => currentColor.set('#0ff')} title="Cyan"></button>
+        <button class="color-preset" style="background: #fff;" on:click={() => currentColor.set('#fff')} title="White"></button>
+      </div>
+    </div>
+
+    <div class="button-group">
+      <button on:click={applyColorToSelection} title="Apply color to selected segments (Enter)">Apply Color</button>
+      <button on:click={copySelection} title="Copy selection (Ctrl+C)">Copy</button>
+      <button on:click={pasteSelection} title="Paste (Ctrl+V)">Paste</button>
+      <button on:click={mirrorSelection} title="Mirror selection horizontally (Ctrl+M)">Mirror</button>
+      <button on:click={deleteSelection} title="Delete colored segments (Delete)">Delete</button>
+      <button on:click={clearSelection} title="Clear selection (Esc)">Clear</button>
+    </div>
+  </div>
 
   <!-- Save buttons -->
   <div class="save-buttons">
