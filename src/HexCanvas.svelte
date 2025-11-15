@@ -7,13 +7,35 @@
     let canvas, ctx;
   
     const HEX_SIZE   = 40;    // how big each hex (outer radius in px)
-    const DRAW_RANGE = 15;    // how many hexes in each direction
     const INCLUDE_CENTER = true;  
     // set false if you DON'T want lines from center→corners/midpoints
   
     // Precompute the local geometry once (radius=1 in local space).
     const fullHex = makeFullHex(INCLUDE_CENTER);
-  
+
+    // Calculate how many hexes we need to draw to fill the viewport (for infinite background)
+    function calculateDrawRange(canvasWidth, canvasHeight, currentScale, camX, camY) {
+      // Calculate the visible world space bounds
+      const worldLeft = (0 - camX) / currentScale;
+      const worldTop = (0 - camY) / currentScale;
+      const worldRight = (canvasWidth - camX) / currentScale;
+      const worldBottom = (canvasHeight - camY) / currentScale;
+
+      // Convert world bounds to hex coordinates
+      const topLeft = pixelToHex(worldLeft, worldTop, HEX_SIZE);
+      const topRight = pixelToHex(worldRight, worldTop, HEX_SIZE);
+      const bottomLeft = pixelToHex(worldLeft, worldBottom, HEX_SIZE);
+      const bottomRight = pixelToHex(worldRight, worldBottom, HEX_SIZE);
+
+      // Find the min/max hex coordinates that cover the viewport (with buffer)
+      const minQ = Math.floor(Math.min(topLeft.q, topRight.q, bottomLeft.q, bottomRight.q)) - 2;
+      const maxQ = Math.ceil(Math.max(topLeft.q, topRight.q, bottomLeft.q, bottomRight.q)) + 2;
+      const minR = Math.floor(Math.min(topLeft.r, topRight.r, bottomLeft.r, bottomRight.r)) - 2;
+      const maxR = Math.ceil(Math.max(topLeft.r, topRight.r, bottomLeft.r, bottomRight.r)) + 2;
+
+      return { minQ, maxQ, minR, maxR };
+    }
+
     // For each cell, we'll scale & offset that local geometry by HEX_SIZE + (cx, cy).
     function cellSegments(q, r) {
       const cxy = hexToPixel(q, r, HEX_SIZE);
@@ -36,27 +58,53 @@
       ctx.clearRect(0, 0, w, h);
   
       ctx.save();
-      ctx.translate(get(cameraX), get(cameraY));
-      ctx.scale(get(scale), get(scale));
-  
+      const currentScale = get(scale);
+      const camX = get(cameraX);
+      const camY = get(cameraY);
+
+      ctx.translate(camX, camY);
+      ctx.scale(currentScale, currentScale);
+
       const sel = get(selectedSegments);
-  
-      for (let q = -DRAW_RANGE; q <= DRAW_RANGE; q++) {
-        for (let r = -DRAW_RANGE; r <= DRAW_RANGE; r++) {
+
+      // Calculate dynamic draw range for infinite background
+      const { minQ, maxQ, minR, maxR } = calculateDrawRange(w, h, currentScale, camX, camY);
+
+      // Use a Set to track already-drawn edges and prevent overlap
+      const drawnEdges = new Set();
+
+      for (let q = minQ; q <= maxQ; q++) {
+        for (let r = minR; r <= maxR; r++) {
           const segs = cellSegments(q, r);
           for (const seg of segs) {
+            // Create a normalized edge key (same for both hexes sharing this edge)
+            // Round to 2 decimal places to handle floating point precision
+            const x1 = Math.round(seg.x1 * 100) / 100;
+            const y1 = Math.round(seg.y1 * 100) / 100;
+            const x2 = Math.round(seg.x2 * 100) / 100;
+            const y2 = Math.round(seg.y2 * 100) / 100;
+
+            // Always put the "smaller" point first for consistent edge keys
+            const edgeKey = (x1 < x2 || (x1 === x2 && y1 < y2))
+              ? `${x1},${y1}-${x2},${y2}`
+              : `${x2},${y2}-${x1},${y1}`;
+
+            // Skip if this edge was already drawn
+            if (drawnEdges.has(edgeKey)) continue;
+            drawnEdges.add(edgeKey);
+
             ctx.beginPath();
             ctx.moveTo(seg.x1, seg.y1);
             ctx.lineTo(seg.x2, seg.y2);
-  
+
             const isSel = sel.has(seg.key);
             ctx.strokeStyle = isSel ? '#f33' : '#555';
-            ctx.lineWidth   = isSel ? (3 / get(scale)) : (1 / get(scale));
+            ctx.lineWidth   = isSel ? (3 / currentScale) : (1 / currentScale);
             ctx.stroke();
           }
         }
       }
-  
+
       ctx.restore();
     }
   
@@ -235,9 +283,7 @@
           for (let dr = -searchRadius; dr <= searchRadius; dr++) {
              const q = roundedCenter.q + dq;
              const r = roundedCenter.r + dr;
-             // Basic range check (optional, depends if DRAW_RANGE is strict)
-             if (Math.abs(q) > DRAW_RANGE || Math.abs(r) > DRAW_RANGE || Math.abs(q + r) > DRAW_RANGE * 2) continue;
-  
+
              const segs = cellSegments(q, r);
              for (const seg of segs) {
                  const dSq = pointToSegmentDistSq(wx, wy, seg.x1, seg.y1, seg.x2, seg.y2);
@@ -249,8 +295,7 @@
          }
       }
   
-      // Optional: Fallback to wider search if nothing found nearby (might be slow)
-      // if (!nearestKey) { ... loop through -DRAW_RANGE to DRAW_RANGE ... }
+      // Note: With infinite background, local search is sufficient for performance
   
       if (nearestKey) {
         selectedSegments.update(old => {
